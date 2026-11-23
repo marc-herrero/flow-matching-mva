@@ -3,7 +3,6 @@ import torch.distributions as D
 
 
 def sample_dist(name, n, dim=1, device="cpu"):
-    """Shared sampler for p0 (noise), q(x1) (dataset), or p1(.|x1) (conditional blob)."""
     zero = torch.tensor(0.0, device=device)
     one = torch.tensor(1.0, device=device)
 
