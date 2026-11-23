@@ -1,0 +1,6 @@
+torch
+matplotlib
+# Optional: uncomment if you later want adaptive dopri5 or minibatch OT baselines
+# torchdiffeq
+# torchcfm
+# POT
