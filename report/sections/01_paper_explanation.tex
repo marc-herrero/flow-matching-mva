@@ -1,3 +1,228 @@
 % !TEX root = ../main.tex
 \section{Paper Explanation}
 \label{sec:paper}
+
+\subsection{Constructing the Conditional Target from a Flow}
+
+Once we know that training with respect to the conditional vector field is equivalent to training with respect to the marginal vector field, the next step is explicitly constructing this conditional target. Instead of starting by designing a conditional probability path as in the original paper \cite{lipman2023flow}, we fix the interpolation flow $\phi_t$ first, which is geometrically more intuitive and generalizes better to arbitrary distributions. From $\phi_t$, we implicitly obtain the probability path via the push-forward operation, $p_t = [\phi_t]_* p_0$, and the target vector field simply by differentiating with respect to time.
+
+Given a data point $z \sim q$, let $p_0 = \mathcal{N}(0, I)$ denote our initial noisy distribution and $p_1(\cdot \mid z) = \mathcal{N}(z, \sigma_{\min}^2 I)$ the conditional target distribution centered around $z$. Unless stated otherwise, $z$ is fixed and everything is conditioned on it.
+
+A first approach could be the \emph{independent conditional coupling}: taking linear interpolants $\phi_t(x_0, x_1) = (1 - t) x_0 + t x_1$ between independent samples $X_0 \sim p_0$ and $X_1 \sim p_1(\cdot \mid z)$, whose instantaneous velocity is $x_1 - x_0$. However, $\phi_t(X_0, X_1)$ defines a stochastic interpolant rather than a deterministic flow: trajectories cross even for a fixed $z$ (Figure~\ref{fig:independent_coupling}), forcing the optimal field $u_t(x \mid z) = \mathbb{E}[X_1 - X_0 \mid \phi_t(X_0, X_1) = x]$ to average conflicting directions and inducing curved trajectories that require many ODE solver steps at inference.
+
+\begin{figure}[t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[
+    >=Stealth,
+    noise/.style={circle, fill=black!85, inner sep=1.6pt},
+    datapoint/.style={circle, fill=black, inner sep=1.5pt},
+    samplept/.style={circle, fill=blue!75!black, inner sep=1.4pt},
+    traj/.style={->, thick, blue!75!black, opacity=0.8}
+]
+\draw[fill=gray!8, draw=gray!60, thick] (0, 0) circle (1.35cm);
+\node[font=\footnotesize] at (0, -1.75) {$p_0 = \mathcal{N}(0, I_n)$};
+\draw[fill=gray!6, draw=gray!50, thick, dashed] (4.6, 0) ellipse (1.65cm and 2.05cm);
+\node[font=\footnotesize, align=center] at (4.6, -2.45) {Data distribution\\($z \sim p_{\text{data}}$)};
+
+\coordinate (z1) at (3.95,  1.25);
+\draw[fill=blue!10, draw=blue!60!black, thick] (z1) circle (0.36cm);
+\node[datapoint, label={[black!80, font=\scriptsize]above:$z^{(1)}$}] at (z1) {};
+
+\coordinate (z2) at (5.35,  0.55);
+\draw[fill=blue!10, draw=blue!60!black, thick] (z2) circle (0.36cm);
+\node[datapoint, label={[black!80, font=\scriptsize]above:$z^{(2)}$}] at (z2) {};
+
+\coordinate (z3) at (3.95, -1.20);
+\draw[fill=blue!10, draw=blue!60!black, thick] (z3) circle (0.36cm);
+\node[datapoint, label={[black!80, font=\scriptsize]below:$z^{(3)}$}] at (z3) {};
+
+\coordinate (z4) at (5.30, -0.65);
+\draw[fill=blue!10, draw=blue!60!black, thick] (z4) circle (0.36cm);
+\node[datapoint, label={[black!80, font=\scriptsize]below:$z^{(4)}$}] at (z4) {};
+
+\node[font=\tiny, blue!65!black] at (5.15, 1.15) {$\mathcal{N}(z^{(2)}, \sigma_{\min}^2 I_n)$};
+
+\coordinate (x1) at (-0.20,  0.85);
+\coordinate (x2) at ( 0.35,  0.28);
+\coordinate (x3) at (-0.35, -0.28);
+\coordinate (x4) at ( 0.20, -0.85);
+
+\coordinate (y1) at (3.83,  1.15);
+\coordinate (y2) at (5.23,  0.44);
+\coordinate (y3) at (4.07, -1.08);
+\coordinate (y4) at (5.18, -0.55);
+
+\draw[traj] (x1) -- (y3);
+\draw[traj] (x2) -- (y4);
+\draw[traj] (x3) -- (y2);
+\draw[traj] (x4) -- (y1);
+
+\foreach \p in {x1, x2, x3, x4} {\node[noise] at (\p) {};}
+\foreach \q in {y1, y2, y3, y4} {\node[samplept] at (\q) {};}
+\end{tikzpicture}%
+}
+\caption{Independent coupling $\pi = p_0 \otimes p_1$. Noise samples $x_0 \sim \mathcal{N}(0, I_n)$ are paired uniformly at random with target samples $x_1 \sim \mathcal{N}(z^{(i)}, \sigma_{\min}^2 I_n)$ drawn around data points $z^{(i)} \sim p_{\text{data}}$, producing intersecting interpolants and curved ODE trajectories.}
+\label{fig:independent_coupling}
+\end{figure}
+
+\subsubsection{Straight Trajectories via Optimal Transport}
+
+To obtain deterministic and injective trajectories conditionally on $z$, we pair each $x_0 \sim p_0$ (assumed absolutely continuous) with its deterministic Optimal Transport (OT) image $x_1 = T(x_0 \mid z)$, where $T: \mathcal{X} \to \mathcal{Y}$ (Brenier map) minimizes $\mathbb{E}_{x_0 \sim p_0}\|x_0 - T(x_0)\|^2$ subject to $p_1(\cdot \mid z) = [T(\cdot \mid z)]_* p_0$. Substituting $x_1 = T(x_0 \mid z)$ yields the deterministic conditional flow
+\begin{equation}
+    \phi_t(x_0 \mid z) = (1 - t) x_0 + t T(x_0 \mid z), \quad \forall t \in [0, 1].
+\end{equation}
+Because the interpolation is linear and $T$ is the OT map, $\phi_t(\cdot \mid z)$ is injective for all $t \in [0, 1)$ (see Appendix~\ref{injectivity} for the proof). Hence, conditional trajectories never cross, and the conditional vector field collapses to the exact particle velocity without averaging:
+\begin{equation}
+    u_t(x \mid z) = \frac{d}{dt}\phi_t(x_0 \mid z) = T(x_0 \mid z) - x_0, \quad x_0 = \phi_t^{-1}(x \mid z),
+\end{equation}
+inducing the probability path $p_t(\cdot \mid z) = [\phi_t(\cdot \mid z)]_* p_0$. The Conditional Flow Matching (CFM) loss becomes
+\begin{multline}
+    \mathcal{L}_{\text{CFM}}(\theta) = \mathbb{E}_{t \sim \mathcal{U}(0,1), \, z \sim q, \, x_0 \sim p_0} \\
+        \left[ \left\| v_\theta\big(t, \phi_t(x_0 \mid z)\big) - \big(T(x_0 \mid z) - x_0\big) \right\|^2 \right].
+\end{multline}
+
+At inference time, however, $z$ is unknown, so $v_\theta(t, x)$ converges to the \emph{marginal} optimal vector field $u_t(x) = \mathbb{E}_{(X_0, X_1) \sim \pi}[X_1 - X_0 \mid \phi_t(X_0, X_1) = x]$. As illustrated in Figure~\ref{fig:conditional_vs_marginal}, while $\phi_t(\cdot \mid z)$ prevents crossings for a fixed $z$, marginal paths across distinct targets $z^{(i)} \neq z^{(j)}$ still intersect whenever $(X_0, z)$ are paired independently---a limitation we address in Section~\ref{sec:beyond}.
+
+\begin{figure}[t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[
+    >=Stealth,
+    noise/.style={circle, fill=black!80, inner sep=1.5pt},
+    datapoint/.style={circle, fill=black, inner sep=1.6pt},
+    traj1/.style={->, thick, blue!75!black, opacity=0.85},
+    traj2/.style={->, thick, red!75!black, opacity=0.85},
+    traj3/.style={->, thick, teal!80!black, opacity=0.85}
+]
+\draw[fill=gray!8, draw=gray!60, thick] (0, 0) circle (1.30cm);
+\node[font=\footnotesize] at (0, -1.70) {$p_0 = \mathcal{N}(0, I_n)$};
+\draw[fill=gray!6, draw=gray!50, thick, dashed] (4.55, 0) ellipse (1.65cm and 2.00cm);
+\node[font=\footnotesize, align=center] at (4.55, -2.40) {Data distribution\\($z \sim p_{\text{data}}$)};
+
+\coordinate (z1) at (3.95, 1.05);
+\draw[fill=blue!12, draw=blue!70!black, thick] (z1) circle (0.38cm);
+\node[datapoint, label={[blue!70!black, font=\scriptsize]above:$z^{(1)}$}] at (z1) {};
+\node[font=\tiny, blue!70!black] at (3.95, 1.65) {$\mathcal{N}(z^{(1)}, \sigma_{\min}^2 I_n)$};
+
+\coordinate (z2) at (4.00, -1.05);
+\draw[fill=red!12, draw=red!70!black, thick] (z2) circle (0.38cm);
+\node[datapoint, label={[red!70!black, font=\scriptsize]below:$z^{(2)}$}] at (z2) {};
+\node[font=\tiny, red!70!black] at (4.00, -1.65) {$\mathcal{N}(z^{(2)}, \sigma_{\min}^2 I_n)$};
+
+\coordinate (z3) at (5.35, 0.05);
+\draw[fill=teal!12, draw=teal!75!black, thick] (z3) circle (0.38cm);
+\node[datapoint, label={[teal!75!black, font=\scriptsize]above:$z^{(3)}$}] at (z3) {};
+\node[font=\tiny, teal!75!black] at (5.35, -0.55) {$\mathcal{N}(z^{(3)}, \sigma_{\min}^2 I_n)$};
+
+\node[noise] (x1a) at (-0.38, -0.62) {};
+\node[noise] (x1b) at (0.30, -0.80) {};
+\draw[traj1] (x1a) -- (3.80, 1.15);
+\draw[traj1] (x1b) -- (4.10, 0.92);
+
+\node[noise] (x2a) at (-0.34, 0.75) {};
+\node[noise] (x2b) at (0.34, 0.58) {};
+\draw[traj2] (x2a) -- (3.85, -0.92);
+\draw[traj2] (x2b) -- (4.15, -1.18);
+
+\node[noise] (x3a) at (-0.52, 0.10) {};
+\node[noise] (x3b) at (0.12, -0.12) {};
+\draw[traj3] (x3a) -- (5.20, 0.18);
+\draw[traj3] (x3b) -- (5.48, -0.10);
+\end{tikzpicture}%
+}
+\caption{Conditional vs. marginal trajectories. Conditioned on a specific data sample $z^{(i)}$, trajectories mapping $p_0 = \mathcal{N}(0, I_n)$ to $p_1(\cdot \mid z^{(i)}) = \mathcal{N}(z^{(i)}, \sigma_{\min}^2 I_n)$ (same color) do not intersect, preserving conditional injectivity, whereas marginal paths across $z^{(i)} \neq z^{(j)}$ still cross.}
+\label{fig:conditional_vs_marginal}
+\end{figure}
+
+\subsection{Closed-Form for Gaussian Distributions}
+
+For isotropic Gaussians $p_0 = \mathcal{N}(0, I)$ and $p_1(\cdot \mid z) = \mathcal{N}(z, \sigma_{\min}^2 I)$, the OT map has the closed form $T(x_0 \mid z) = z + \sigma_{\min} x_0$, giving the affine conditional flow:
+\begin{equation}
+    \phi_t(x_0 \mid z) = \big(1 - (1 - \sigma_{\min})t\big) x_0 + t z.
+\end{equation}
+This way, starting from a flow and applying the push-forward change-of-variables formula (see Appendix~\ref{push_forward}), we recover the Gaussian conditional probability path proposed by Lipman et al.~\cite{lipman2023flow} (Figure~\ref{fig:conditional_gaussian_ot_1d}):
+\begin{equation}
+    p_t(x \mid z) = \mathcal{N}\Big(x \;\Big|\; t z, \; \big(1 - (1 - \sigma_{\min})t\big)^2 I_n\Big).
+\end{equation}
+
+\begin{figure}[t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[
+    >=Stealth,
+    xscale=1.0,
+    yscale=1.35,
+    declare function={
+        gauss(\x,\mu,\sigma) = (1/(\sigma*sqrt(2*pi)))*exp(-0.5*((\x-\mu)/\sigma)^2);
+    }
+]
+\def\zval{4.2}
+\def\smin{0.26}
+\draw[->, thick, gray!75] (-2.7, 0) -- (5.3, 0) node[right, black!85, font=\footnotesize] {$x$};
+
+\foreach \t in {0.25, 0.50, 0.75} {
+    \pgfmathsetmacro{\mut}{\t * \zval}
+    \pgfmathsetmacro{\sigmat}{(1 - \t) + \t * \smin}
+    \pgfmathsetmacro{\xmin}{\mut - 3.1 * \sigmat}
+    \pgfmathsetmacro{\xmax}{\mut + 3.1 * \sigmat}
+    \draw[gray!70, thick, fill=gray!14, fill opacity=0.45, domain=\xmin:\xmax, samples=100, smooth]
+        plot (\x, {gauss(\x, \mut, \sigmat)}) -- (\xmax, 0) -- (\xmin, 0) -- cycle;
+}
+
+\node[font=\footnotesize, gray!85!black] at (1.85, 1.32) {$p_t(\cdot \mid z) = \mathcal{N}(\mu_t, \sigma_t^2)$};
+\draw[->, gray!75, thin] (1.55, 1.20) -- (1.10, 0.52);
+\draw[->, gray!75, thin] (1.90, 1.20) -- (2.10, 0.68);
+\draw[->, gray!75, thin] (2.25, 1.20) -- (3.05, 0.90);
+
+\draw[blue!75!black, very thick, fill=blue!15, fill opacity=0.55, domain=-2.6:2.6, samples=120, smooth]
+    plot (\x, {gauss(\x, 0, 1.0)}) -- (2.6, 0) -- (-2.6, 0) -- cycle;
+\node[blue!75!black, font=\footnotesize, align=center] at (-1.45, 0.68) {$p_0 = \mathcal{N}(0, 1)$};
+
+\draw[red!75!black, very thick, fill=red!16, fill opacity=0.60, domain=3.4:5.0, samples=120, smooth]
+    plot (\x, {gauss(\x, \zval, \smin)}) -- (5.0, 0) -- (3.4, 0) -- cycle;
+\node[red!75!black, font=\footnotesize, align=center] at (4.10, 1.72) {$p_1(\cdot \mid z) = \mathcal{N}(z, \sigma_{\min}^2)$};
+
+\draw[thick, blue!75!black] (0, 0.05) -- (0, -0.05) node[below, font=\scriptsize, blue!75!black] {$0$};
+\draw[thick, red!75!black] (\zval, 0.05) -- (\zval, -0.05) node[below, font=\scriptsize, red!75!black] {$z$};
+
+\def\yzero{-0.28}
+\def\yone{-0.95}
+\draw[dashed, gray!55] (-2.1, \yzero) -- (4.85, \yzero) node[right, font=\scriptsize, black!75] {$t=0$};
+\draw[dashed, gray!55] (-2.1, \yone)  -- (4.85, \yone)  node[right, font=\scriptsize, black!75] {$t=1$};
+
+\foreach \xzero in {-1.25, -0.4, 0.4, 1.25} {
+    \pgfmathsetmacro{\xone}{\smin * \xzero + \zval}
+    \draw[->, thick, orange!85!black] (\xzero, \yzero) -- (\xone, \yone);
+    \fill[blue!75!black] (\xzero, \yzero) circle (1.2pt);
+    \fill[red!75!black] (\xone, \yone) circle (1.2pt);
+}
+\node[font=\footnotesize, orange!80!black] at (0.85, -0.78) {$\phi_t(x_0 \mid z) = (1-t)x_0 + t T(x_0 \mid z)$};
+\end{tikzpicture}%
+}
+\caption{Conditional optimal transport probability path in 1D. The source Gaussian $p_0 = \mathcal{N}(0, 1)$ (blue) contracts toward $p_1(\cdot \mid z) = \mathcal{N}(z, \sigma_{\min}^2)$ (red) via intermediate Gaussian marginals $p_t(\cdot \mid z)$ (gray). Below the axis, the linear transport trajectories $\phi_t(x_0 \mid z)$.}
+\label{fig:conditional_gaussian_ot_1d}
+\end{figure}
+
+Inverting $y = \phi_t(x_0 \mid z)$ gives $x_0 = \frac{y - tz}{1 - (1 - \sigma_{\min})t}$, and substituting into $\frac{d}{dt}\phi_t(x_0 \mid z) = z - (1 - \sigma_{\min})x_0$ yields the closed-form conditional vector field:
+\begin{equation}
+    u_t(y \mid z) = \frac{z - (1 - \sigma_{\min})y}{1 - (1 - \sigma_{\min})t},
+\end{equation}
+which simplifies the training objective to:
+\begin{multline}
+    \mathcal{L}_{\text{CFM}}(\theta) = \mathbb{E}_{t \sim \mathcal{U}(0,1), \, z \sim q, \, x_0 \sim \mathcal{N}(0, I)} \\
+        \Big[ \Big\| v_\theta\Big(t, \big(1 - (1 - \sigma_{\min})t\big)x_0 + tz\Big) - \big(z - (1 - \sigma_{\min})x_0\big) \Big\|^2 \Big].
+\end{multline}
+
+\subsection{Comparison with Diffusion-Based Probability Paths}
+
+In \cite{lipman2023flow}, the authors reverse this order by prescribing a Gaussian path $p_t(x \mid z) = \mathcal{N}\big(x \mid \mu_t(z), \sigma_t(z)^2 I\big)$ first and inducing the flow $\phi_t(x_0 \mid z) = \mu_t(z) + \sigma_t(z) x_0$, yielding:
+\begin{equation}
+    u_t(x \mid z) = \frac{\sigma_t'(z)}{\sigma_t(z)}\big(x - \mu_t(z)\big) + \mu_t'(z).
+\end{equation}
+Reversing classical forward diffusion schedules ($s = 1 - t$) recovers:
+\begin{itemize}
+    \item \textbf{Variance Exploding (VE):} $\mu_t(z) = z$, $\sigma_t(z) = \sigma_{1 - t}$, giving $u_t(x \mid z) = -\frac{\sigma_{1 - t}'}{\sigma_{1 - t}} (x - z)$.
+    \item \textbf{Variance Preserving (VP):} $\mu_t(z) = \alpha_{1 - t} z$, $\sigma_t(z) = \sqrt{1 - \alpha_{1 - t}^2}$ with $\alpha_s = e^{-\frac{1}{2} \int_0^s \beta(r)\,dr}$, giving $u_t(x \mid z) = -\frac{\alpha_{1-t}'}{1 - \alpha_{1-t}^2}(z - \alpha_{1-t} x)$.
+\end{itemize}
+Unlike our constant-velocity OT flow ($\mu_t(z) = tz$, $\sigma_t(z) = 1 - (1 - \sigma_{\min})t$), both diffusion paths exhibit nonlinear time scalings that curve trajectories and require finer numerical integration.

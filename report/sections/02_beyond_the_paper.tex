@@ -2,8 +2,256 @@
 \section{Beyond the Paper}
 \label{sec:beyond}
 
-\subsection{Smoother Targets: Preprocessing Improvements}
+\subsection{How can we efficiently couple noise with data?}
 \label{sec:preprocessing}
 
+Although the CFM loss is computed over individual conditional paths $X_1 - X_0$, its minimizer is the marginal vector field $u_t(x) = \mathbb{E}_{(X_0, X_1)\sim\pi}[X_1 - X_0 \mid X_t = x]$, with $X_t = \phi_t(X_0, X_1)$. When $\pi$ is an independent coupling, trajectories heading toward different data points $z^{(i)} \neq z^{(j)}$ still intersect across the space, forcing $u_t(x)$ to average conflicting directions and producing curved marginal paths that require many ODE steps at inference. To straighten $u_t(x)$ and enable accurate generation with very few function evaluations (NFE), we must design a better coupling $\pi(x_0, x_1)$ between noise samples $x_0 \sim p_0 = \mathcal{N}(0, I_n)$ and smoothed targets $x_1 \sim p_1$, where $p_1(x_1) = \int \mathcal{N}(x_1 \mid z, \sigma_{\min}^2 I_n)\,q(z)\,dz$ (or $p_1 = \frac{1}{N}\sum_{i=1}^N \mathcal{N}(z^{(i)}, \sigma_{\min}^2 I_n)$ for a discrete dataset $\{z^{(i)}\}_{i=1}^N$).
+
+\textbf{Independent coupling}
+
+Here, noise samples $x_0 \sim p_0$ and data points $z \sim q$ are drawn independently from $p_0 \otimes q = p_0(x_0)\,q(z)$, and $x_0$ is then mapped via the conditional Brenier map $x_1 = T(x_0 \mid z) = z + \sigma_{\min} x_0$, inducing:
+\begin{equation}
+    \pi_{\text{ind}}(x_0, x_1) = \int \delta_{T(x_0 \mid z)}(x_1)\, p_0(x_0)\, q(z)\, dz.
+\end{equation}
+This ignores any geometric similarity between $p_0$ and $q$. Moreover, we can quantify the trajectory averaging in $u_t(x)$ via the irreducible conditional variance:
+\begin{multline}
+    \mathcal{C}(\pi) = \int_0^1 \\
+    \mathbb{E}_{(X_0, X_1) \sim \pi} \left[ \left\| (X_1 - X_0) - u_t\big(\phi_t(X_0, X_1)\big) \right\|^2 \right] dt,
+\end{multline}
+which decomposes the objective as $\mathcal{L}_{\text{CFM}}(\theta) = \mathcal{L}_{\text{FM}}(\theta) + \mathcal{C}(\pi)$. Because $\mathcal{C}(\pi)$ does not depend on $\theta$, it sets a strict lower bound on $\mathcal{L}_{\text{CFM}}(\theta)$ even for an exact network. Under $\pi_{\text{ind}}$, frequent marginal crossings (Figure~\ref{fig:independent_coupling}) guarantee $\mathcal{C}(\pi_{\text{ind}}) > 0$, producing noisier gradients and curved trajectories that require many solver steps at inference.
+
+\textbf{Semi-discrete OT coupling}
+
+Since computing an exact OT map between $p_0$ and the intractable marginal $p_1$ is infeasible, we sample $N$ data points and formulate a global \textbf{semi-discrete OT} problem \cite{peyre2019computational} coupling the continuous source $\alpha = p_0$ to the empirical target $\beta = \frac{1}{N}\sum_{i=1}^N \delta_{z^{(i)}}$. Following the dual derivation in Appendix~\ref{Laguerre cells}, the optimal dual potentials $v^* = (v_1^*, \dots, v_N^*)$ partition the noise space $\mathcal{X}$ into $N$ polyhedral \textbf{Laguerre cells}:
+\begin{multline}
+    V_j(v^*) = \bigl\{ x_0 \in \mathcal{X} \\
+        \;\big|\; \|x_0 - z^{(j)}\|^2 - v_j^* \le \|x_0 - z^{(k)}\|^2 - v_k^*, \;\; \forall k \neq j \bigr\},
+\end{multline}
+where each cell $V_j$ has the noise points associated to $z_j$, and carries probability mass $\frac{1}{N}$ at optimality (Figure~\ref{fig:laguerre_cells_real}).
+
+
+\begin{figure*}[t]
+    \centering
+    \begin{minipage}[b]{0.42\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{sections/images/laguerre_cells_real.pdf}
+        \caption{Exact Laguerre partition of $\mathbb{R}^2$ induced by $p_0 = \mathcal{N}(0, I_2)$ for $N=5$ target data points $z^{(1)}, \dots, z^{(5)}$.}
+        \label{fig:laguerre_cells_real}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.55\textwidth}
+        \centering
+        \resizebox{\textwidth}{!}{%
+        \begin{tikzpicture}[
+            >=Stealth,
+            noise/.style={circle, fill=black!85, inner sep=1.6pt},
+            datapoint/.style={circle, fill=black, inner sep=1.5pt},
+            samplept/.style={circle, fill=teal!75!black, inner sep=1.4pt},
+            traj/.style={->, thick, teal!75!black, opacity=0.82},
+            cellline/.style={gray!75, thick, dashed}
+        ]
+
+        % --- IZQUIERDA: Distribución de ruido p_0 = N(0, I_n) particionada en 5 celdas de Laguerre ---
+        \begin{scope}
+            \clip (0, 0) circle (1.75cm);
+            \fill[gray!8] (-2, -2) rectangle (2, 2);
+            \draw[cellline] (-0.15,  0.00) -- (-1.85,  0.65);
+            \draw[cellline] (-0.15,  0.00) -- ( 0.25,  1.85);
+            \draw[cellline] (-0.15,  0.00) -- ( 1.85, -0.10);
+            \draw[cellline] (-0.15,  0.00) -- ( 0.15, -1.85);
+            \draw[cellline] (-0.15,  0.00) -- (-1.85, -0.65);
+        \end{scope}
+        \draw[draw=gray!65, thick] (0, 0) circle (1.75cm);
+        \node[font=\small] at (0, -2.2) {$p_0 = \mathcal{N}(0, I_n)$ (Laguerre cells $V_i$)};
+
+        \node[font=\tiny, gray!85!black] at (-0.65,  1.25) {$V_1$};
+        \node[font=\tiny, gray!85!black] at ( 0.95,  1.05) {$V_2$};
+        \node[font=\tiny, gray!85!black] at (-1.30,  0.00) {$V_3$};
+        \node[font=\tiny, gray!85!black] at (-0.65, -1.25) {$V_4$};
+        \node[font=\tiny, gray!85!black] at ( 0.95, -1.05) {$V_5$};
+
+        % --- DERECHA: Distribución de datos p_data ---
+        \draw[fill=gray!6, draw=gray!50, thick, dashed] (7.6, 0) ellipse (2.25cm and 2.55cm);
+        \node[font=\small] at (7.6, -2.9) {Data distribution ($z \sim p_{\text{data}}$)};
+
+        % --- 5 Puntos z^(i) y sus bolas N(z^(i), \sigma_{min}^2 I_n) ---
+        \coordinate (z1) at (6.75,  1.55);
+        \draw[fill=teal!10, draw=teal!65!black, thick] (z1) circle (0.42cm);
+        \node[datapoint, label={[black!80, font=\scriptsize]above:$z^{(1)}$}] at (z1) {};
+
+        \coordinate (z2) at (8.55,  0.90);
+        \draw[fill=teal!10, draw=teal!65!black, thick] (z2) circle (0.42cm);
+        \node[datapoint, label={[black!80, font=\scriptsize]above:$z^{(2)}$}] at (z2) {};
+        \node[font=\tiny, teal!65!black] at (8.55, 1.58) {$\mathcal{N}(z^{(2)}, \sigma_{\min}^2 I_n)$};
+
+        \coordinate (z3) at (6.45,  0.00);
+        \draw[fill=teal!10, draw=teal!65!black, thick] (z3) circle (0.42cm);
+        \node[datapoint, label={[black!80, font=\scriptsize]above:$z^{(3)}$}] at (z3) {};
+
+        \coordinate (z5) at (8.55, -0.90);
+        \draw[fill=teal!10, draw=teal!65!black, thick] (z5) circle (0.42cm);
+        \node[datapoint, label={[black!80, font=\scriptsize]below:$z^{(5)}$}] at (z5) {};
+
+        \coordinate (z4) at (6.75, -1.55);
+        \draw[fill=teal!10, draw=teal!65!black, thick] (z4) circle (0.42cm);
+        \node[datapoint, label={[black!80, font=\scriptsize]below:$z^{(4)}$}] at (z4) {};
+
+        % --- 8 Puntos de ruido x_0 ---
+        \coordinate (x1a) at (-0.25,  1.30);
+        \coordinate (x1b) at (-0.80,  0.92);
+        \coordinate (x2a) at ( 0.45,  0.95);
+        \coordinate (x2b) at ( 0.85,  0.50);
+        \coordinate (x3)  at (-0.85,  0.00);
+        \coordinate (x5)  at ( 0.85, -0.50);
+        \coordinate (x4a) at (-0.80, -0.92);
+        \coordinate (x4b) at (-0.25, -1.30);
+
+        % --- 8 Muestras destino x_1 ~ N(z^(i), \sigma_{min}^2 I_n) ---
+        \coordinate (y1a) at (6.65,  1.70);
+        \coordinate (y1b) at (6.88,  1.42);
+        \coordinate (y2a) at (8.45,  1.05);
+        \coordinate (y2b) at (8.68,  0.75);
+        \coordinate (y3)  at (6.45,  0.00);
+        \coordinate (y5)  at (8.68, -0.75);
+        \coordinate (y4a) at (6.88, -1.42);
+        \coordinate (y4b) at (6.65, -1.70);
+
+        % --- Trayectorias de transporte ---
+        \draw[traj] (x1a) -- (y1a);
+        \draw[traj] (x1b) -- (y1b);
+        \draw[traj] (x2a) -- (y2a);
+        \draw[traj] (x2b) -- (y2b);
+        \draw[traj] (x3)  -- (y3);
+        \draw[traj] (x5)  -- (y5);
+        \draw[traj] (x4a) -- (y4a);
+        \draw[traj] (x4b) -- (y4b);
+
+        % --- Nodos encima de las líneas ---
+        \foreach \p in {x1a, x1b, x2a, x2b, x3, x5, x4a, x4b} {
+            \node[noise] at (\p) {};
+        }
+        \foreach \q in {y1a, y1b, y2a, y2b, y3, y5, y4a, y4b} {
+            \node[samplept] at (\q) {};
+        }
+
+        \end{tikzpicture}%
+        }
+        \caption{Semi-discrete OT coupling. Each noise sample $x_0 \in V_i$ is assigned to its corresponding data center $z^{(i)}$ and paired with a perturbed target $x_1 \sim \mathcal{N}(z^{(i)}, \sigma_{\min}^2 I_n)$, preventing crossings across distinct targets.}
+        \label{fig:semidiscrete_coupling}
+    \end{minipage}
+\end{figure*}
+
+During training, we sample $x_0 \sim p_0$, identify its cell $V_i$, and draw $x_1 = z^{(i)} + \sigma_{\min}\epsilon$ with $\epsilon \sim \mathcal{N}(0, I_n)$ 
+
+
+\textit{(since $p_0(\cdot \mid z^{(i)}) = N p_0(\cdot)\mathbf{1}_{V_i}(\cdot)$ is truncated rather than full Gaussian, we cannot apply $\sigma_{\min}x_0 + z^{(i)}$). This remains a valid conditional construction because $\frac{1}{N}\sum_{i=1}^N p_0(\cdot \mid z^{(i)}) = p_0$.}
+
+\paragraph{Positive aspects:} This is the globally optimal assignment. It eliminates trajectory crossings \textbf{both conditionally and marginally} as $\sigma_{\min} \to 0$, driving $\mathcal{C}(\pi_{\text{SD-OT}}) \to 0$ so that $u_t(x) = X_1 - X_0$ along straight paths (with only residual crossings near $t=1$), enabling fast few-step inference.
+
+\paragraph{Negative aspects:} Optimizing $N$ dual variables and performing an $\mathcal{O}(N \cdot n)$ nearest-cell search at every step is costly for large $N$ and high dimensions. Furthermore, numerical dual optimization yields only approximate cell masses ($\approx 1/N$), biasing the data marginal, while the optimal field is discontinuous across Laguerre boundaries 
+
+\textit{and leaves empty gaps in the marginal path (e.g., $(tz^{(1)}, tz^{(2)})$ in 1D for $N=2$), which a smooth neural network cannot represent exactly.}
+
+\textbf{Mini-batch OT coupling}
+
+As a scalable alternative when $N$ is large, we draw batches $\{x_0^{(i)}, x_1^{(i)}\}_{i=1}^{B}$ ($B \ll N$) and solve the discrete optimal assignment $\sigma^* \in S_B$ at the batch level \cite{tong2024improving, pooladian2023multisample}:
+\begin{equation}
+    \sigma^* = \operatorname*{arg\,min}_{\sigma \in S_B} \sum_{i=1}^B \left\| x_0^{(i)} - x_1^{(\sigma(i))} \right\|^2,
+\end{equation}
+using the Hungarian algorithm in $\mathcal{O}(B^3)$ time (or Sinkhorn in $\mathcal{O}(B^2)$ per iteration), and train on the matched pairs $(x_0^{(i)}, x_1^{(\sigma^*(i))})$ (Figure~\ref{fig:minibatch_ot_coupling}).
+
+\paragraph{Positive aspects:} Accounting for batch-level geometry lowers regression target variance, reduces gradient noise, and yields much straighter flows than independent coupling. Moreover, it is done without precomputing global potentials, so it is more time efficient.
+
+\paragraph{Negative aspects:} Enforcing a one-to-one permutation within each batch deviates from the global OT plan: if multiple batch noise samples fall into the same global Laguerre cell, mini-batch OT forces them toward distinct data points, reintroducing some crossings across batches. This approximation error shrinks as $B$ increases (at higher per-step cost) and reduces to independent coupling when $B=1$.
+
+
+\begin{figure}[t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[
+    >=Stealth,
+    noise/.style={circle, fill=black!85, inner sep=1.5pt},
+    datapoint/.style={circle, fill=black, inner sep=1.4pt},
+    samplept/.style={circle, fill=teal!75!black, inner sep=1.3pt},
+    traj/.style={->, thick, teal!75!black, opacity=0.82}
+]
+
+% --- IZQUIERDA: Distribución de ruido p_0 = N(0, I_n) ---
+\draw[fill=gray!8, draw=gray!60, thick] (0, 0) circle (1.42cm);
+\node[font=\footnotesize, align=center] at (0, -1.90) {Mini-batch noise\\($x_0^{(k)} \sim \mathcal{N}(0, I_n)$)};
+
+% --- DERECHA: Distribución de datos p_data ---
+\draw[fill=gray!6, draw=gray!50, thick, dashed] (4.65, 0) ellipse (1.75cm and 2.15cm);
+\node[font=\footnotesize, align=center] at (4.65, -2.55) {Mini-batch data\\($z^{(i)} \sim p_{\text{data}}$)};
+
+% --- 6 Puntos de ruido x_0^(1..6) ordenados de arriba hacia abajo ---
+\coordinate (x1) at (-0.15,  1.05);
+\coordinate (x2) at ( 0.40,  0.63);
+\coordinate (x3) at (-0.42,  0.21);
+\coordinate (x4) at ( 0.35, -0.21);
+\coordinate (x5) at (-0.35, -0.63);
+\coordinate (x6) at ( 0.20, -1.05);
+
+% --- 6 Puntos z^(i) DESORDENADOS espacialmente y sus bolas N(z^(i), \sigma_{min}^2 I_n) ---
+\coordinate (z4) at (3.95,  1.32);
+\draw[fill=teal!10, draw=teal!65!black, thick] (z4) circle (0.31cm);
+\node[datapoint, label={[black!80, font=\scriptsize]above:$z^{(4)}$}] at (z4) {};
+
+\coordinate (z2) at (5.38,  0.82);
+\draw[fill=teal!10, draw=teal!65!black, thick] (z2) circle (0.31cm);
+\node[datapoint, label={[black!80, font=\scriptsize]above:$z^{(2)}$}] at (z2) {};
+\node[font=\tiny, teal!65!black] at (5.32, 1.35) {$\mathcal{N}(z^{(2)}, \sigma_{\min}^2 I_n)$};
+
+\coordinate (z6) at (3.90,  0.20);
+\draw[fill=teal!10, draw=teal!65!black, thick] (z6) circle (0.31cm);
+\node[datapoint, label={[black!80, font=\scriptsize]above:$z^{(6)}$}] at (z6) {};
+
+\coordinate (z1) at (5.38, -0.28);
+\draw[fill=teal!10, draw=teal!65!black, thick] (z1) circle (0.31cm);
+\node[datapoint, label={[black!80, font=\scriptsize]below:$z^{(1)}$}] at (z1) {};
+
+\coordinate (z3) at (3.95, -0.88);
+\draw[fill=teal!10, draw=teal!65!black, thick] (z3) circle (0.31cm);
+\node[datapoint, label={[black!80, font=\scriptsize]below:$z^{(3)}$}] at (z3) {};
+
+\coordinate (z5) at (5.30, -1.32);
+\draw[fill=teal!10, draw=teal!65!black, thick] (z5) circle (0.31cm);
+\node[datapoint, label={[black!80, font=\scriptsize]below:$z^{(5)}$}] at (z5) {};
+
+% --- 6 Muestras destino x_1 ~ N(z^(i), \sigma_{min}^2 I_n) ---
+\coordinate (y4) at (3.89,  1.24);
+\coordinate (y2) at (5.30,  0.76);
+\coordinate (y6) at (3.95,  0.16);
+\coordinate (y1) at (5.30, -0.24);
+\coordinate (y3) at (3.89, -0.82);
+\coordinate (y5) at (5.24, -1.24);
+
+% --- Asignación óptima del mini-batch ---
+\draw[traj] (x1) -- (y4);
+\draw[traj] (x2) -- (y2);
+\draw[traj] (x3) -- (y6);
+\draw[traj] (x4) -- (y1);
+\draw[traj] (x5) -- (y3);
+\draw[traj] (x6) -- (y5);
+
+% --- Nodos y etiquetas de ruido ---
+\node[noise, label={[black!85, font=\scriptsize]left:$x_0^{(1)}$}] at (x1) {};
+\node[noise, label={[black!85, font=\scriptsize]left:$x_0^{(2)}$}] at (x2) {};
+\node[noise, label={[black!85, font=\scriptsize]left:$x_0^{(3)}$}] at (x3) {};
+\node[noise, label={[black!85, font=\scriptsize]left:$x_0^{(4)}$}] at (x4) {};
+\node[noise, label={[black!85, font=\scriptsize]left:$x_0^{(5)}$}] at (x5) {};
+\node[noise, label={[black!85, font=\scriptsize]left:$x_0^{(6)}$}] at (x6) {};
+
+\foreach \q in {y4, y2, y6, y1, y3, y5} {
+    \node[samplept] at (\q) {};
+}
+
+\end{tikzpicture}%
+}
+\caption{Mini-batch OT coupling ($B=6$). Ordered noise samples $x_0^{(1)}, \dots, x_0^{(6)} \sim \mathcal{N}(0, I_n)$ and randomly indexed data samples $z^{(1)}, \dots, z^{(6)} \sim p_{\text{data}}$ are drawn independently in a batch. Solving the discrete optimal assignment pairs each $x_0^{(k)}$ with the nearest Gaussian neighborhood $\mathcal{N}(z^{(i)}, \sigma_{\min}^2 I_n)$, disentangling trajectories within the batch.}
+\label{fig:minibatch_ot_coupling}
+\end{figure}
+
 \subsection{Starting From Elsewhere: Beyond the Gaussian Source}
+
 \label{sec:distributions}
